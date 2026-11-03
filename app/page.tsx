@@ -9,11 +9,165 @@ type Message = {
   content: string;
 };
 
+
+type SpeechRecognitionLike = {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  start: () => void;
+  stop?: () => void;
+  onresult: ((event: {
+    resultIndex: number;
+    results: ArrayLike<
+      ArrayLike<{ transcript: string }> & { isFinal: boolean }
+    >;
+  }) => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onend: (() => void) | null;
+};
+
+
+
+/* =========================================================
+   PARSE RAG SOURCES
+   ========================================================= */
+
+function parseAssistantContent(content: string) {
+  const metadataStart =
+    "__OMNIX_SOURCES__";
+
+  const metadataEnd =
+    "__END_OMNIX_SOURCES__";
+
+  let cleanContent = content;
+
+  let sourceMetadata: Source[] = [];
+
+  const metadataStartIndex =
+    content.indexOf(metadataStart);
+
+  const metadataEndIndex =
+    content.indexOf(metadataEnd);
+
+  if (
+    metadataStartIndex !== -1 &&
+    metadataEndIndex !== -1 &&
+    metadataEndIndex > metadataStartIndex
+  ) {
+    const metadataStartPosition =
+      metadataStartIndex +
+      metadataStart.length;
+
+    const metadataJson =
+      content.slice(
+        metadataStartPosition,
+        metadataEndIndex
+      );
+
+    try {
+      const parsedMetadata =
+        JSON.parse(metadataJson);
+
+      if (
+        parsedMetadata.type === "sources" &&
+        Array.isArray(
+          parsedMetadata.sources
+        )
+      ) {
+        sourceMetadata =
+          parsedMetadata.sources.filter(
+            (source: unknown): source is Source =>
+              typeof source === "object" &&
+              source !== null &&
+              "documentId" in source &&
+              "documentName" in source &&
+              "pageNumber" in source
+          );
+      }
+    } catch (error) {
+      console.error(
+        "Failed to parse source metadata:",
+        error
+      );
+    }
+
+    cleanContent =
+      content.slice(
+        0,
+        metadataStartIndex
+      ) +
+      content.slice(
+        metadataEndIndex +
+          metadataEnd.length
+      );
+  }
+
+  const marker =
+    /\n---\s*\n\*\*Sources:\*\*\n([\s\S]*)$/;
+
+  const match =
+    cleanContent.match(marker);
+
+  if (
+    !match ||
+    match.index === undefined
+  ) {
+    return {
+      answer: cleanContent,
+      sources: sourceMetadata,
+    };
+  }
+
+  const textSources = match[1]
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/^[-*]\s*/, "")
+        .trim()
+    )
+    .filter(Boolean)
+    .map((source) =>
+      source.startsWith("📄")
+        ? source.slice(1).trim()
+        : source
+    );
+
+  return {
+    answer: cleanContent
+      .slice(0, match.index)
+      .trimEnd(),
+
+    sources:
+      sourceMetadata.length > 0
+        ? sourceMetadata
+        : textSources.map((source) => ({
+            documentId: "",
+            documentName: source
+              .replace(
+                /\s+— Page \d+$/,
+                ""
+              ),
+            pageNumber:
+              Number(
+                source.match(
+                  /— Page (\d+)$/
+                )?.[1]
+              ) || null,
+          })),
+  };
+}
+
 type UploadedDocument = {
   id: string;
   name: string;
   pages?: number;
   createdAt: string;
+};
+
+type Source = {
+  documentId: string;
+  documentName: string;
+  pageNumber: number | null;
 };
 
 type Conversation = {
@@ -52,21 +206,34 @@ export default function Home() {
   const [actionLoading, setActionLoading] =
     useState(false);
 
-  // Load conversation history
+  const [isListening, setIsListening] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState("");
+
+  /* =========================================================
+     LOAD CONVERSATION HISTORY
+     ========================================================= */
+
   useEffect(() => {
     loadConversations();
   }, []);
 
-  // Restore last opened conversation
+  /* =========================================================
+     RESTORE LAST OPENED CONVERSATION
+     ========================================================= */
+
   useEffect(() => {
     const savedConversationId =
-      localStorage.getItem("omnix-conversation-id");
+      localStorage.getItem(
+        "omnix-conversation-id"
+      );
 
     if (!savedConversationId) {
       return;
     }
 
-    fetch(`/api/conversations/${savedConversationId}`)
+    fetch(
+      `/api/conversations/${savedConversationId}`
+    )
       .then(async (response) => {
         if (!response.ok) {
           throw new Error(
@@ -88,7 +255,8 @@ export default function Home() {
             })
           );
 
-        const loadedDocuments: UploadedDocument[] =
+        const loadedDocuments:
+          UploadedDocument[] =
           (conversation.documents || []).map(
             (document: {
               id: string;
@@ -102,8 +270,12 @@ export default function Home() {
           );
 
         setMessages(loadedMessages);
-        setUploadedDocuments(loadedDocuments);
-        setConversationId(savedConversationId);
+        setUploadedDocuments(
+          loadedDocuments
+        );
+        setConversationId(
+          savedConversationId
+        );
       })
       .catch((error) => {
         console.error(
@@ -120,6 +292,10 @@ export default function Home() {
         setUploadedDocuments([]);
       });
   }, []);
+
+  /* =========================================================
+     LOAD CONVERSATIONS
+     ========================================================= */
 
   async function loadConversations() {
     try {
@@ -147,6 +323,10 @@ export default function Home() {
       setLoadingHistory(false);
     }
   }
+
+  /* =========================================================
+     OPEN CONVERSATION
+     ========================================================= */
 
   async function openConversation(id: string) {
     try {
@@ -178,7 +358,8 @@ export default function Home() {
           })
         );
 
-      const loadedDocuments: UploadedDocument[] =
+      const loadedDocuments:
+        UploadedDocument[] =
         (conversation.documents || []).map(
           (document: {
             id: string;
@@ -192,7 +373,9 @@ export default function Home() {
         );
 
       setMessages(loadedMessages);
-      setUploadedDocuments(loadedDocuments);
+      setUploadedDocuments(
+        loadedDocuments
+      );
       setConversationId(id);
 
       localStorage.setItem(
@@ -206,6 +389,10 @@ export default function Home() {
       );
     }
   }
+
+  /* =========================================================
+     RENAME CONVERSATION
+     ========================================================= */
 
   async function renameConversation(
     id: string,
@@ -222,10 +409,13 @@ export default function Home() {
       return;
     }
 
-    const trimmedTitle = newTitle.trim();
+    const trimmedTitle =
+      newTitle.trim();
 
     if (!trimmedTitle) {
-      alert("Chat name cannot be empty.");
+      alert(
+        "Chat name cannot be empty."
+      );
       return;
     }
 
@@ -244,23 +434,27 @@ export default function Home() {
         }
       );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (!response.ok) {
         throw new Error(
-          data.error || "Failed to rename chat"
+          data.error ||
+            "Failed to rename chat"
         );
       }
 
-      setConversations((previous) =>
-        previous.map((conversation) =>
-          conversation.id === id
-            ? {
-                ...conversation,
-                title: data.title,
-              }
-            : conversation
-        )
+      setConversations(
+        (previous) =>
+          previous.map(
+            (conversation) =>
+              conversation.id === id
+                ? {
+                    ...conversation,
+                    title: data.title,
+                  }
+                : conversation
+          )
       );
     } catch (error) {
       console.error(
@@ -268,11 +462,19 @@ export default function Home() {
         error
       );
 
-      alert("Failed to rename chat.");
+      alert(
+        "Failed to rename chat."
+      );
     }
   }
 
-  async function deleteConversation(id: string) {
+  /* =========================================================
+     DELETE CONVERSATION
+     ========================================================= */
+
+  async function deleteConversation(
+    id: string
+  ) {
     setOpenMenuId(null);
 
     const conversation =
@@ -280,11 +482,15 @@ export default function Home() {
         (item) => item.id === id
       );
 
-    const confirmed = window.confirm(
-      `Delete "${
-        conversation?.title || "this chat"
-      }"?\n\nThis will permanently delete the conversation and its messages.`
-    );
+    const confirmed =
+      window.confirm(
+        `Delete "${
+          conversation?.title ||
+          "this chat"
+        }"?
+
+This will permanently delete the conversation and its messages.`
+      );
 
     if (!confirmed) {
       return;
@@ -298,7 +504,8 @@ export default function Home() {
         }
       );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (!response.ok) {
         throw new Error(
@@ -307,11 +514,12 @@ export default function Home() {
         );
       }
 
-      setConversations((previous) =>
-        previous.filter(
-          (conversation) =>
-            conversation.id !== id
-        )
+      setConversations(
+        (previous) =>
+          previous.filter(
+            (conversation) =>
+              conversation.id !== id
+          )
       );
 
       if (conversationId === id) {
@@ -331,31 +539,37 @@ export default function Home() {
         error
       );
 
-      alert("Failed to delete chat.");
+      alert(
+        "Failed to delete chat."
+      );
     }
   }
 
-  // =========================================================
-  // FILE UPLOAD - PDF + TXT + DOCX
-  // =========================================================
+  /* =========================================================
+     FILE UPLOAD
+     ========================================================= */
 
   async function uploadPDF(
     event: React.ChangeEvent<HTMLInputElement>
   ) {
-    const file = event.target.files?.[0];
+    const file =
+      event.target.files?.[0];
 
     if (!file) {
       return;
     }
 
-    const fileName = file.name.toLowerCase();
+    const fileName =
+      file.name.toLowerCase();
 
     const isPDF =
-      file.type === "application/pdf" ||
+      file.type ===
+        "application/pdf" ||
       fileName.endsWith(".pdf");
 
     const isTXT =
-      file.type === "text/plain" ||
+      file.type ===
+        "text/plain" ||
       fileName.endsWith(".txt");
 
     const isDOCX =
@@ -363,39 +577,58 @@ export default function Home() {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
       fileName.endsWith(".docx");
 
-      const isCSV =
-  file.type === "text/csv" ||
-  fileName.endsWith(".csv");
+    const isCSV =
+      file.type === "text/csv" ||
+      fileName.endsWith(".csv");
 
-const isXLSX =
-  file.type ===
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
-  fileName.endsWith(".xlsx");
+    const isXLSX =
+      file.type ===
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+      fileName.endsWith(".xlsx");
 
-    // Validate all supported file types
+    const isPPTX =
+      file.type ===
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
+      fileName.endsWith(".pptx");
+
+    const isImage =
+      file.type === "image/jpeg" ||
+      file.type === "image/png" ||
+      file.type === "image/webp" ||
+      fileName.endsWith(".jpg") ||
+      fileName.endsWith(".jpeg") ||
+      fileName.endsWith(".png") ||
+      fileName.endsWith(".webp");
+
     if (
-  !isPDF &&
-  !isTXT &&
-  !isDOCX &&
-  !isCSV &&
-  !isXLSX
-) {
-  alert(
-    "Please select a PDF, TXT, DOCX, CSV, or XLSX file."
-  );
+      !isPDF &&
+      !isTXT &&
+      !isDOCX &&
+      !isCSV &&
+      !isXLSX &&
+      !isPPTX &&
+      !isImage
+    ) {
+      alert(
+        "Please select a PDF, TXT, DOCX, CSV, XLSX, PPTX, JPG, JPEG, PNG, or WEBP file."
+      );
 
-  event.target.value = "";
-  return;
-}
+      event.target.value = "";
+
+      return;
+    }
 
     try {
       setUploading(true);
 
-      const formData = new FormData();
+      const formData =
+        new FormData();
 
-      formData.append("file", file);
+      formData.append(
+        "file",
+        file
+      );
 
-      // Attach to current conversation if available
       if (conversationId) {
         formData.append(
           "conversationId",
@@ -403,83 +636,137 @@ const isXLSX =
         );
       }
 
-      const response = await fetch(
-        "/api/upload",
-        {
-          method: "POST",
-          body: formData,
-        }
+      const response =
+        await fetch(
+          "/api/upload",
+          {
+            method: "POST",
+            body: formData,
+          }
+        );
+
+      const responseText =
+        await response.text();
+
+      console.log(
+        "UPLOAD STATUS:",
+        response.status
       );
 
-      const data = await response.json();
+      console.log(
+        "UPLOAD RESPONSE:",
+        responseText
+      );
+
+      let uploadData: {
+        error?: string;
+        documentId?: string;
+        fileName?: string;
+        pages?: number;
+        conversationId?: string;
+        [key: string]: unknown;
+      } = {};
+
+      if (
+        responseText.trim()
+      ) {
+        try {
+          uploadData =
+            JSON.parse(
+              responseText
+            );
+        } catch (error) {
+          console.error(
+            "Invalid JSON from upload API:",
+            error
+          );
+        }
+      }
 
       if (!response.ok) {
         throw new Error(
-          data.error || "File upload failed"
+          uploadData.error ||
+            `Upload failed with status ${response.status}`
         );
       }
 
-      // If backend created a new conversation,
-      // save its ID immediately.
-      if (data.conversationId) {
-        setConversationId(data.conversationId);
+      if (
+        uploadData.conversationId
+      ) {
+        setConversationId(
+          uploadData.conversationId
+        );
 
         localStorage.setItem(
           "omnix-conversation-id",
-          data.conversationId
+          uploadData.conversationId
         );
       }
 
-      // Add uploaded file to UI
-      setUploadedDocuments((previous) => [
-        ...previous,
-        {
-          id: data.documentId,
-          name: data.fileName,
-          pages: data.pages,
-          createdAt:
-            new Date().toISOString(),
-        },
-      ]);
+      if (
+        uploadData.documentId &&
+        uploadData.fileName
+      ) {
+        setUploadedDocuments(
+          (previous) => [
+            ...previous,
+            {
+              id:
+                uploadData.documentId!,
+              name:
+                uploadData.fileName!,
+              pages:
+                typeof uploadData.pages ===
+                "number"
+                  ? uploadData.pages
+                  : undefined,
+              createdAt:
+                new Date().toISOString(),
+            },
+          ]
+        );
+      }
 
-      // Refresh sidebar conversations
       await loadConversations();
 
+      alert(
+        `${file.name} uploaded successfully.`
+      );
     } catch (error) {
       console.error(
-        "File upload error:",
+        "Upload error:",
         error
       );
 
       alert(
         error instanceof Error
           ? error.message
-          : "Failed to upload file. Please try again."
+          : "Failed to upload file."
       );
     } finally {
       setUploading(false);
-
-      // Allow selecting the same file again
       event.target.value = "";
     }
   }
 
-  // =========================================================
-  // DELETE UPLOADED DOCUMENT
-  // =========================================================
+  /* =========================================================
+     REMOVE DOCUMENT
+     ========================================================= */
 
-  async function removeUploadedDocument(
-    id: string
+  async function removeDocument(
+    documentId: string
   ) {
     try {
-      const response = await fetch(
-        `/api/documents/${id}`,
-        {
-          method: "DELETE",
-        }
-      );
+      const response =
+        await fetch(
+          `/api/documents/${documentId}`,
+          {
+            method: "DELETE",
+          }
+        );
 
-      const data = await response.json();
+      const data =
+        await response.json();
 
       if (!response.ok) {
         throw new Error(
@@ -488,597 +775,322 @@ const isXLSX =
         );
       }
 
-      setUploadedDocuments((previous) =>
-        previous.filter(
-          (document) => document.id !== id
-        )
+      setUploadedDocuments(
+        (previous) =>
+          previous.filter(
+            (document) =>
+              document.id !==
+              documentId
+          )
       );
-
-      await loadConversations();
-
     } catch (error) {
       console.error(
-        "Delete document error:",
+        "Remove document error:",
         error
       );
 
       alert(
-        error instanceof Error
-          ? error.message
-          : "Failed to delete document."
+        "Failed to remove document."
       );
     }
   }
 
-  // =========================================================
-  // REGENERATE LATEST ASSISTANT RESPONSE
-  // =========================================================
+  /* =========================================================
+     SEND MESSAGE
+     ========================================================= */
 
-  async function regenerateMessage() {
+
+
+function startVoiceInput() {
+  const speechWindow = window as Window & {
+    SpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+  };
+
+  const SpeechRecognitionAPI =
+    speechWindow.SpeechRecognition ||
+    speechWindow.webkitSpeechRecognition;
+
+  if (!SpeechRecognitionAPI) {
+    alert("Speech recognition is not supported. Please try Google Chrome.");
+    return;
+  }
+
+  if (isListening) return;
+
+  const recognition = new SpeechRecognitionAPI();
+  let finalTranscript = "";
+  let interim = "";
+  const seenFinalResults = new Set<number>();
+
+  recognition.lang = "en-IN";
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+
+  recognition.onresult = (event) => {
+    interim = "";
+
+    for (let i = 0; i < event.results.length; i++) {
+      const result = event.results[i];
+      const transcript = result[0]?.transcript?.trim();
+
+      if (!transcript) continue;
+
+      if (result.isFinal) {
+        if (!seenFinalResults.has(i)) {
+          finalTranscript += (finalTranscript ? " " : "") + transcript;
+          seenFinalResults.add(i);
+        }
+      } else {
+        interim += (interim ? " " : "") + transcript;
+      }
+    }
+
+    setInterimTranscript(interim);
+  };
+
+  recognition.onerror = (event) => {
+    console.error("Speech recognition error:", event.error);
+    setIsListening(false);
+    setInterimTranscript("");
+
+    if (event.error === "not-allowed") {
+      alert("Please allow microphone access in your browser settings.");
+    } else if (event.error !== "no-speech") {
+      console.error("Voice input failed:", event.error);
+    }
+  };
+
+  recognition.onend = () => {
+    const completedTranscript = finalTranscript.trim();
+
+    if (completedTranscript) {
+      setMessage((previous) => {
+        const existing = previous.trim();
+        return existing
+          ? `${existing} ${completedTranscript}`
+          : completedTranscript;
+      });
+    }
+
+    setInterimTranscript("");
+    setIsListening(false);
+  };
+
+  try {
+    setInterimTranscript("");
+    setIsListening(true);
+    recognition.start();
+  } catch (error) {
+    console.error("Could not start voice input:", error);
+    setIsListening(false);
+    setInterimTranscript("");
+  }
+}
+
+
+  function speakResponse(content: string) {
+    if (!("speechSynthesis" in window)) {
+      alert("Spoken responses are not supported in this browser.");
+      return;
+    }
+
+    const { answer } = parseAssistantContent(content);
+    const cleanText = answer
+      .replace(/```[\s\S]*?```/g, "Code block omitted.")
+      .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/[#*_`~]/g, "")
+      .trim();
+
+    if (!cleanText) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    utterance.lang = "en-IN";
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function stopSpeaking() {
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+  }
+
+
+  async function sendMessage() {
+    const trimmedMessage =
+      message.trim();
+
     if (
-      !conversationId ||
+      !trimmedMessage ||
       loading ||
       actionLoading
     ) {
       return;
     }
 
-    const lastAssistantIndex =
-      messages.findLastIndex(
-        (item) => item.role === "assistant"
-      );
-
-    if (lastAssistantIndex === -1) {
-      return;
-    }
-
-    const messagesForAI =
-      messages.slice(0, lastAssistantIndex);
-
-    setActionLoading(true);
-
-    try {
-      setMessages(messagesForAI);
-
-      const response = await fetch(
-        "/api/chat/actions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-          body: JSON.stringify({
-            conversationId,
-            messages: messagesForAI,
-            mode: "regenerate",
-          }),
-        }
-      );
-
-      if (!response.ok || !response.body) {
-        let errorMessage =
-          "Failed to regenerate response";
-
-        try {
-          const errorData =
-            await response.json();
-
-          if (errorData.error) {
-            errorMessage =
-              errorData.error;
-          }
-        } catch {
-          // Ignore JSON parsing error
-        }
-
-        throw new Error(errorMessage);
-      }
-
-      const reader =
-        response.body.getReader();
-
-      const decoder =
-        new TextDecoder();
-
-      let assistantResponse = "";
-
-      setMessages([
-        ...messagesForAI,
-        {
-          role: "assistant",
-          content: "",
-        },
-      ]);
-
-      while (true) {
-        const { done, value } =
-          await reader.read();
-
-        if (done) {
-          break;
-        }
-
-        const chunk =
-          decoder.decode(value, {
-            stream: true,
-          });
-
-        assistantResponse += chunk;
-
-        setMessages([
-          ...messagesForAI,
-          {
-            role: "assistant",
-            content: assistantResponse,
-          },
-        ]);
-      }
-
-      const finalChunk =
-        decoder.decode();
-
-      if (finalChunk) {
-        assistantResponse += finalChunk;
-
-        setMessages([
-          ...messagesForAI,
-          {
-            role: "assistant",
-            content: assistantResponse,
-          },
-        ]);
-      }
-
-      await loadConversations();
-
-    } catch (error) {
-      console.error(
-        "Regenerate error:",
-        error
-      );
-
-      alert(
-        error instanceof Error
-          ? error.message
-          : "Failed to regenerate response."
-      );
-    } finally {
-      setActionLoading(false);
-    }
-  }
-
-  // =========================================================
-  // START EDITING USER MESSAGE
-  // =========================================================
-
-  function startEditingMessage(
-    index: number
-  ) {
-    const selectedMessage = messages[index];
-
-    if (!selectedMessage) {
-      return;
-    }
-
-    if (selectedMessage.role !== "user") {
-      return;
-    }
-
-    if (loading || actionLoading) {
-      return;
-    }
-
-    setEditingIndex(index);
-    setMessage(selectedMessage.content);
-  }
-
-  // =========================================================
-  // SAVE EDITED USER MESSAGE
-  // =========================================================
-
-  async function saveEditedMessage() {
-    if (
-      editingIndex === null ||
-      !conversationId ||
-      !message.trim() ||
-      actionLoading
-    ) {
-      return;
-    }
-
-    const editIndex = editingIndex;
-
-    const newUserMessage: Message = {
+    const userMessage: Message = {
       role: "user",
-      content: message.trim(),
+      content: trimmedMessage,
     };
 
-    const messagesBeforeEdit =
-      messages.slice(0, editIndex);
-
-    const newMessages = [
-      ...messagesBeforeEdit,
-      newUserMessage,
-    ];
-
-    setActionLoading(true);
-    setEditingIndex(null);
     setMessage("");
 
-    try {
-      setMessages(newMessages);
-
-      const response = await fetch(
-        "/api/chat/actions",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-          body: JSON.stringify({
-            conversationId,
-            messages: newMessages,
-            mode: "edit",
-            editIndex,
-          }),
-        }
-      );
-
-      if (!response.ok || !response.body) {
-        let errorMessage =
-          "Failed to edit message";
-
-        try {
-          const errorData =
-            await response.json();
-
-          if (errorData.error) {
-            errorMessage =
-              errorData.error;
-          }
-        } catch {
-          // Ignore JSON parsing error
-        }
-
-        throw new Error(errorMessage);
-      }
-
-      const reader =
-        response.body.getReader();
-
-      const decoder =
-        new TextDecoder();
-
-      let assistantResponse = "";
-
-      setMessages([
-        ...newMessages,
-        {
-          role: "assistant",
-          content: "",
-        },
-      ]);
-
-      while (true) {
-        const { done, value } =
-          await reader.read();
-
-        if (done) {
-          break;
-        }
-
-        const chunk =
-          decoder.decode(value, {
-            stream: true,
-          });
-
-        assistantResponse += chunk;
-
-        setMessages([
-          ...newMessages,
-          {
-            role: "assistant",
-            content: assistantResponse,
-          },
-        ]);
-      }
-
-      const finalChunk =
-        decoder.decode();
-
-      if (finalChunk) {
-        assistantResponse += finalChunk;
-
-        setMessages([
-          ...newMessages,
-          {
-            role: "assistant",
-            content: assistantResponse,
-          },
-        ]);
-      }
-
-      await loadConversations();
-
-    } catch (error) {
-      console.error(
-        "Edit message error:",
-        error
-      );
-
-      alert(
-        error instanceof Error
-          ? error.message
-          : "Failed to edit message."
-      );
-    } finally {
-      setActionLoading(false);
-    }
-  }
-
-  // =========================================================
-  // SEND MESSAGE
-  // =========================================================
-
-  async function sendMessage() {
-  if (
-    !message.trim() ||
-    loading ||
-    actionLoading
-  ) {
-    return;
-  }
-
-  const userMessage: Message = {
-    role: "user",
-    content: message.trim(),
-  };
-
-  const updatedMessages: Message[] = [
-    ...messages,
-    userMessage,
-  ];
-
-  setMessages([
-    ...updatedMessages,
-    {
-      role: "assistant",
-      content: "",
-    },
-  ]);
-
-  setMessage("");
-  setLoading(true);
-
-  try {
-    console.log(
-      "FRONTEND: Sending message..."
+    setMessages(
+      (previous) => [
+        ...previous,
+        userMessage,
+      ]
     );
 
-    const response = await fetch(
-      "/api/chat",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type":
-            "application/json",
-        },
-        body: JSON.stringify({
-          messages: updatedMessages,
-          conversationId,
-        }),
-      }
-    );
-
-    console.log(
-      "FRONTEND: Response received:",
-      response.status
-    );
-
-    if (!response.ok) {
-      let errorMessage =
-        "Something went wrong";
-
-      try {
-        const errorData =
-          await response.json();
-
-        if (errorData.error) {
-          errorMessage =
-            errorData.error;
-        }
-      } catch {
-        // Ignore JSON parsing error
-      }
-
-      throw new Error(errorMessage);
-    }
-
-    if (!response.body) {
-      throw new Error(
-        "No response stream received from server."
-      );
-    }
-
-    console.log(
-      "FRONTEND: Response stream available"
-    );
-
-    const reader =
-      response.body.getReader();
-
-    const decoder =
-      new TextDecoder("utf-8");
+    setLoading(true);
 
     let assistantResponse = "";
 
-    while (true) {
-      const {
-        done,
-        value,
-      } = await reader.read();
-
-      if (done) {
-        console.log(
-          "FRONTEND: Stream finished"
-        );
-
-        break;
-      }
-
-      const chunk =
-        decoder.decode(value, {
-          stream: true,
-        });
-
-      console.log(
-        "FRONTEND: Received chunk:",
-        chunk
-      );
-
-      if (!chunk) {
-        continue;
-      }
-
-      assistantResponse += chunk;
-
-      setMessages((previous) => {
-  const updated = [...previous];
-
-  const assistantIndex =
-    updated.findLastIndex(
-      (item) => item.role === "assistant"
-    );
-
-  if (assistantIndex !== -1) {
-    updated[assistantIndex] = {
-      role: "assistant",
-      content: assistantResponse,
-    };
-  }
-
-  return updated;
-});
-    }
-
-    // Flush decoder
-    const finalChunk =
-      decoder.decode();
-
-    if (finalChunk) {
-      assistantResponse +=
-        finalChunk;
-
-      setMessages((previous) => {
-  const updated = [...previous];
-
-  const assistantIndex =
-    updated.findLastIndex(
-      (item) => item.role === "assistant"
-    );
-
-  if (assistantIndex !== -1) {
-    updated[assistantIndex] = {
-      role: "assistant",
-      content: assistantResponse,
-    };
-  }
-
-  return updated;
-});
-    }
-
-    console.log(
-      "FRONTEND: Final response:",
-      assistantResponse
-    );
-
-    if (!assistantResponse) {
-      setMessages([
-        ...updatedMessages,
+    setMessages(
+      (previous) => [
+        ...previous,
         {
           role: "assistant",
-          content:
-            "The AI returned an empty response.",
+          content: "",
         },
-      ]);
-    }
-
-    // Refresh sidebar
-    await loadConversations();
-
-    // Capture newly created conversation ID
-    if (!conversationId) {
-      const historyResponse =
-        await fetch(
-          "/api/conversations"
-        );
-
-      if (historyResponse.ok) {
-        const history =
-          await historyResponse.json();
-
-        setConversations(history);
-
-        if (history.length > 0) {
-          const newestConversation =
-            history[0];
-
-          setConversationId(
-            newestConversation.id
-          );
-
-          localStorage.setItem(
-            "omnix-conversation-id",
-            newestConversation.id
-          );
-        }
-      }
-    }
-  } catch (error) {
-    console.error(
-      "FRONTEND CHAT ERROR:",
-      error
+      ]
     );
 
-    setMessages([
-      ...updatedMessages,
-      {
-        role: "assistant",
-        content:
-          error instanceof Error
-            ? error.message
-            : "Failed to receive response from Omnix.AI.",
-      },
-    ]);
-  } finally {
-    setLoading(false);
-  }
-}
+    try {
+      const response =
+        await fetch(
+          "/api/chat",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              conversationId,
+              messages: [
+                ...messages,
+                userMessage,
+              ],
+            }),
+          }
+        );
 
-  function handleKeyDown(
-    event: React.KeyboardEvent<HTMLTextAreaElement>
-  ) {
-    if (
-      event.key === "Enter" &&
-      !event.shiftKey
-    ) {
-      event.preventDefault();
+      if (!response.ok) {
+        const errorText =
+          await response.text();
 
-      if (editingIndex !== null) {
-        saveEditedMessage();
-      } else {
-        sendMessage();
+        throw new Error(
+          errorText ||
+            "Failed to send message"
+        );
       }
+
+      const newConversationId =
+        response.headers.get(
+          "X-Conversation-Id"
+        );
+
+      if (
+        newConversationId
+      ) {
+        setConversationId(
+          newConversationId
+        );
+
+        localStorage.setItem(
+          "omnix-conversation-id",
+          newConversationId
+        );
+      }
+
+      if (!response.body) {
+        throw new Error(
+          "No response body"
+        );
+      }
+
+      const reader =
+        response.body.getReader();
+
+      const decoder =
+        new TextDecoder();
+
+      while (true) {
+        const {
+          value,
+          done,
+        } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        const chunk =
+          decoder.decode(
+            value,
+            {
+              stream: true,
+            }
+          );
+
+        assistantResponse +=
+          chunk;
+
+        setMessages(
+          (previous) => {
+            const updated =
+              [...previous];
+
+            updated[
+              updated.length - 1
+            ] = {
+              role: "assistant",
+              content:
+                assistantResponse,
+            };
+
+            return updated;
+          }
+        );
+      }
+
+      await loadConversations();
+    } catch (error) {
+      console.error(
+        "Send message error:",
+        error
+      );
+
+      setMessages(
+        (previous) => {
+          const updated =
+            [...previous];
+
+          updated[
+            updated.length - 1
+          ] = {
+            role: "assistant",
+            content:
+              error instanceof Error
+                ? `Sorry, I couldn't complete that request.\n\n${error.message}`
+                : "Sorry, I couldn't complete that request.",
+          };
+
+          return updated;
+        }
+      );
+    } finally {
+      setLoading(false);
     }
   }
 
-  function cancelEditing() {
-    setEditingIndex(null);
-    setMessage("");
-  }
+  /* =========================================================
+     NEW CHAT
+     ========================================================= */
 
   function newChat() {
     setMessages([]);
@@ -1093,70 +1105,482 @@ const isXLSX =
     );
   }
 
+  /* =========================================================
+     START EDITING MESSAGE
+     ========================================================= */
+
+  function startEditingMessage(
+    index: number
+  ) {
+    const target =
+      messages[index];
+
+    if (
+      !target ||
+      target.role !== "user"
+    ) {
+      return;
+    }
+
+    setEditingIndex(index);
+    setMessage(target.content);
+  }
+
+  /* =========================================================
+     CANCEL EDIT
+     ========================================================= */
+
+  function cancelEditing() {
+    setEditingIndex(null);
+    setMessage("");
+  }
+
+  /* =========================================================
+     EDIT MESSAGE
+     ========================================================= */
+
+  async function editMessage() {
+    if (
+      editingIndex === null ||
+      !message.trim() ||
+      actionLoading ||
+      loading
+    ) {
+      return;
+    }
+
+    const index =
+      editingIndex;
+
+    const updatedMessages =
+      messages.slice(
+        0,
+        index + 1
+      );
+
+    updatedMessages[index] = {
+      role: "user",
+      content:
+        message.trim(),
+    };
+
+    setMessages(
+      updatedMessages
+    );
+
+    setEditingIndex(null);
+    setMessage("");
+    setActionLoading(true);
+    setLoading(true);
+
+    let assistantResponse = "";
+
+    setMessages(
+      (previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content: "",
+        },
+      ]
+    );
+
+    try {
+      const response =
+        await fetch(
+          "/api/chat/actions",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              mode: "edit",
+              conversationId,
+              messageIndex: index,
+              messages:
+                updatedMessages,
+            }),
+          }
+        );
+
+      if (!response.ok) {
+        const errorText =
+          await response.text();
+
+        throw new Error(
+          errorText ||
+            "Failed to edit message"
+        );
+      }
+
+      const newConversationId =
+        response.headers.get(
+          "X-Conversation-Id"
+        );
+
+      if (
+        newConversationId
+      ) {
+        setConversationId(
+          newConversationId
+        );
+
+        localStorage.setItem(
+          "omnix-conversation-id",
+          newConversationId
+        );
+      }
+
+      if (!response.body) {
+        throw new Error(
+          "No response body"
+        );
+      }
+
+      const reader =
+        response.body.getReader();
+
+      const decoder =
+        new TextDecoder();
+
+      while (true) {
+        const {
+          value,
+          done,
+        } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        const chunk =
+          decoder.decode(
+            value,
+            {
+              stream: true,
+            }
+          );
+
+        assistantResponse +=
+          chunk;
+
+        setMessages(
+          (previous) => {
+            const updated =
+              [...previous];
+
+            updated[
+              updated.length - 1
+            ] = {
+              role: "assistant",
+              content:
+                assistantResponse,
+            };
+
+            return updated;
+          }
+        );
+      }
+
+      await loadConversations();
+    } catch (error) {
+      console.error(
+        "Edit message error:",
+        error
+      );
+
+      setMessages(
+        (previous) => {
+          const updated =
+            [...previous];
+
+          updated[
+            updated.length - 1
+          ] = {
+            role: "assistant",
+            content:
+              error instanceof Error
+                ? `Sorry, I couldn't complete that request.\n\n${error.message}`
+                : "Sorry, I couldn't complete that request.",
+          };
+
+          return updated;
+        }
+      );
+    } finally {
+      setActionLoading(false);
+      setLoading(false);
+    }
+  }
+
+  /* =========================================================
+     REGENERATE MESSAGE
+     ========================================================= */
+
+  async function regenerateMessage() {
+    if (
+      loading ||
+      actionLoading ||
+      !conversationId
+    ) {
+      return;
+    }
+
+    const lastUserIndex =
+      messages.findLastIndex(
+        (item) =>
+          item.role === "user"
+      );
+
+    if (
+      lastUserIndex === -1
+    ) {
+      return;
+    }
+
+    const previousMessages =
+      messages.slice(
+        0,
+        lastUserIndex + 1
+      );
+
+    setMessages(
+      previousMessages
+    );
+
+    setActionLoading(true);
+    setLoading(true);
+
+    let assistantResponse = "";
+
+    setMessages(
+      (previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content: "",
+        },
+      ]
+    );
+
+    try {
+      const response =
+        await fetch(
+          "/api/chat/actions",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              mode: "regenerate",
+              conversationId,
+              messages:
+                previousMessages,
+            }),
+          }
+        );
+
+      if (!response.ok) {
+        const errorText =
+          await response.text();
+
+        throw new Error(
+          errorText ||
+            "Failed to regenerate response"
+        );
+      }
+
+      if (!response.body) {
+        throw new Error(
+          "No response body"
+        );
+      }
+
+      const reader =
+        response.body.getReader();
+
+      const decoder =
+        new TextDecoder();
+
+      while (true) {
+        const {
+          value,
+          done,
+        } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        const chunk =
+          decoder.decode(
+            value,
+            {
+              stream: true,
+            }
+          );
+
+        assistantResponse +=
+          chunk;
+
+        setMessages(
+          (previous) => {
+            const updated =
+              [...previous];
+
+            updated[
+              updated.length - 1
+            ] = {
+              role: "assistant",
+              content:
+                assistantResponse,
+            };
+
+            return updated;
+          }
+        );
+      }
+
+      await loadConversations();
+    } catch (error) {
+      console.error(
+        "Regenerate message error:",
+        error
+      );
+
+      setMessages(
+        (previous) => {
+          const updated =
+            [...previous];
+
+          updated[
+            updated.length - 1
+          ] = {
+            role: "assistant",
+            content:
+              error instanceof Error
+                ? `Sorry, I couldn't complete that request.\n\n${error.message}`
+                : "Sorry, I couldn't complete that request.",
+          };
+
+          return updated;
+        }
+      );
+    } finally {
+      setActionLoading(false);
+      setLoading(false);
+    }
+  }
+
+  /* =========================================================
+     KEYBOARD HANDLER
+     ========================================================= */
+
+  function handleKeyDown(
+    event: React.KeyboardEvent<HTMLTextAreaElement>
+  ) {
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey
+    ) {
+      event.preventDefault();
+
+      if (
+        editingIndex !== null
+      ) {
+        editMessage();
+      } else {
+        sendMessage();
+      }
+    }
+  }
+
+  /* =========================================================
+     FILTER CONVERSATIONS
+     ========================================================= */
+
   const filteredConversations =
     conversations.filter(
       (conversation) =>
         conversation.title
           .toLowerCase()
           .includes(
-            searchQuery.toLowerCase()
+            searchQuery
+              .toLowerCase()
           )
     );
 
+  /* =========================================================
+     UI
+     ========================================================= */
+
   return (
-    <main className="flex h-screen bg-[#212121] text-white">
+    <div className="relative isolate flex h-screen overflow-hidden bg-[#08060f] text-white">
+      <div aria-hidden="true" className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
+        <div className="absolute -left-32 -top-40 h-[32rem] w-[32rem] rounded-full bg-violet-600/20 blur-[120px]" />
+        <div className="absolute right-[-8rem] top-[18%] h-[28rem] w-[28rem] rounded-full bg-fuchsia-600/10 blur-[130px]" />
+        <div className="absolute bottom-[-14rem] left-[35%] h-[30rem] w-[30rem] rounded-full bg-indigo-500/15 blur-[130px]" />
+      </div>
 
       {/* =====================================================
           SIDEBAR
-      ===================================================== */}
+          ===================================================== */}
 
-      <aside className="hidden w-64 flex-col bg-[#171717] p-3 md:flex">
+      <aside className="flex w-64 shrink-0 flex-col border-r border-white/[0.12] bg-white/[0.035] shadow-[inset_-1px_0_0_rgba(255,255,255,0.025)] backdrop-blur-3xl">
 
-        <button
-          onClick={newChat}
-          className="mb-4 rounded-lg border border-gray-700 px-4 py-3 text-left hover:bg-[#2a2a2a]"
-        >
-          + New Chat
-        </button>
+        <div className="p-3">
 
-        <input
-          type="text"
-          placeholder="Search chats..."
-          value={searchQuery}
-          onChange={(e) =>
-            setSearchQuery(e.target.value)
-          }
-          className="mb-3 w-full rounded-lg border border-gray-700 bg-[#212121] px-3 py-2 text-sm text-white outline-none placeholder:text-gray-500 focus:border-gray-500"
-        />
+          <button
+            onClick={newChat}
+            className="w-full rounded-xl border border-white/10 px-4 py-3 text-left text-sm hover:bg-violet-500/15"
+          >
+            ＋　New chat
+          </button>
 
-        <div className="mb-3 px-2 text-sm text-gray-400">
-          Recent
         </div>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="px-3 pb-3">
+
+          <input
+            value={searchQuery}
+            onChange={(event) =>
+              setSearchQuery(
+                event.target.value
+              )
+            }
+            placeholder="Search chats..."
+            className="w-full rounded-xl border border-white/[0.12] bg-white/[0.045] px-3 py-2.5 text-sm text-slate-200 outline-none transition placeholder:text-slate-500 focus:border-violet-400/50 focus:bg-violet-500/[0.04]"
+          />
+
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-2">
 
           {loadingHistory ? (
-            <div className="px-3 py-2 text-sm text-gray-500">
-              Loading...
+            <div className="px-3 py-4 text-sm text-gray-500">
+              Loading chats...
             </div>
-          ) : conversations.length === 0 ? (
-            <div className="px-3 py-2 text-sm text-gray-500">
-              No conversations yet
-            </div>
-          ) : filteredConversations.length === 0 ? (
-            <div className="px-3 py-2 text-sm text-gray-500">
-              No chats found
+          ) : filteredConversations.length ===
+            0 ? (
+            <div className="px-3 py-4 text-sm text-gray-500">
+              No conversations
             </div>
           ) : (
             filteredConversations.map(
               (conversation) => (
                 <div
-                  key={conversation.id}
-                  className={`group relative mb-1 flex items-center rounded-lg hover:bg-[#2a2a2a] ${
-                    conversation.id ===
-                    conversationId
-                      ? "bg-[#2a2a2a]"
-                      : ""
+                  key={
+                    conversation.id
+                  }
+                  className={`group relative mb-1 flex items-center rounded-xl border border-transparent transition ${
+                    conversationId ===
+                    conversation.id
+                      ? "border-violet-400/15 bg-violet-500/10 shadow-sm shadow-violet-950/10"
+                      : "hover:bg-white/[0.04]"
                   }`}
                 >
 
@@ -1166,31 +1590,32 @@ const isXLSX =
                         conversation.id
                       )
                     }
-                    className="min-w-0 flex-1 truncate px-3 py-2 text-left text-sm"
+                    className="min-w-0 flex-1 px-3 py-3 text-left text-sm"
                   >
-                    {conversation.title}
+                    <div className="truncate">
+                      {
+                        conversation.title
+                      }
+                    </div>
                   </button>
 
                   <button
-                    onClick={(event) => {
-                      event.stopPropagation();
-
+                    onClick={() =>
                       setOpenMenuId(
                         openMenuId ===
                           conversation.id
                           ? null
                           : conversation.id
-                      );
-                    }}
-                    className="mr-1 rounded-md px-2 py-1 text-gray-400 opacity-0 hover:bg-[#3a3a3a] hover:text-white group-hover:opacity-100"
-                    title="Chat options"
+                      )
+                    }
+                    className="mr-2 rounded-md px-2 py-1 text-gray-500 hover:bg-white/[0.07] hover:text-white"
                   >
-                    ⋮
+                    ⋯
                   </button>
 
                   {openMenuId ===
                     conversation.id && (
-                    <div className="absolute right-1 top-9 z-50 w-36 overflow-hidden rounded-lg border border-gray-700 bg-[#2a2a2a] shadow-xl">
+                    <div className="absolute right-2 top-10 z-20 w-36 rounded-lg border border-white/[0.14] bg-[#171322]/75 backdrop-blur-3xl p-1 shadow-xl shadow-black/40">
 
                       <button
                         onClick={() =>
@@ -1199,9 +1624,9 @@ const isXLSX =
                             conversation.title
                           )
                         }
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[#3a3a3a]"
+                        className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-white/[0.07]"
                       >
-                        ✏️ Rename
+                        Rename
                       </button>
 
                       <button
@@ -1210,9 +1635,9 @@ const isXLSX =
                             conversation.id
                           )
                         }
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-red-400 hover:bg-[#3a3a3a]"
+                        className="w-full rounded-md px-3 py-2 text-left text-sm text-red-400 hover:bg-white/[0.07]"
                       >
-                        🗑️ Delete
+                        Delete
                       </button>
 
                     </div>
@@ -1225,96 +1650,100 @@ const isXLSX =
 
         </div>
 
-        <button className="rounded-lg px-3 py-3 text-left text-sm hover:bg-[#2a2a2a]">
-          ⚙ Settings
-        </button>
+        <div className="border-t border-white/[0.09] bg-white/[0.02] p-4 text-xs text-slate-500">
+          Omnix.AI
+        </div>
 
       </aside>
 
       {/* =====================================================
-          MAIN
-      ===================================================== */}
+          MAIN AREA
+          ===================================================== */}
 
-      <section className="flex flex-1 flex-col">
+      <main className="flex min-w-0 flex-1 flex-col">
 
         {/* HEADER */}
 
-        <header className="flex h-14 items-center border-b border-gray-700 px-5">
+        <header className="flex items-center justify-between border-b border-white/[0.09] bg-white/[0.025] px-6 py-4 backdrop-blur-2xl">
 
-          <h1 className="text-lg font-semibold">
-            Omnix
-            <span className="text-gray-400">
-              .AI
-            </span>
-          </h1>
+          <div>
 
-          <div className="ml-4 rounded-md bg-[#2f2f2f] px-3 py-1 text-xs text-gray-300">
-            Qwen3 1.7B
+            <h1 className="bg-gradient-to-r from-white via-violet-100 to-violet-300 bg-clip-text text-lg font-semibold tracking-tight text-transparent">
+              Omnix.AI
+            </h1>
+
+            <p className="text-xs text-gray-500">
+              Your personal AI assistant
+            </p>
+
           </div>
 
-          <button className="ml-auto rounded-lg px-3 py-2 hover:bg-[#2a2a2a]">
-            ⚙
-          </button>
+          {uploadedDocuments.length >
+            0 && (
+            <div className="flex max-w-xl flex-wrap justify-end gap-2">
+
+              {uploadedDocuments.map(
+                (document) => (
+                  <div
+                    key={
+                      document.id
+                    }
+                    className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-xs"
+                  >
+
+                    <span>
+                      📄
+                    </span>
+
+                    <span className="max-w-40 truncate">
+                      {document.name}
+                    </span>
+
+                    <button
+                      onClick={() =>
+                        removeDocument(
+                          document.id
+                        )
+                      }
+                      disabled={
+                        uploading ||
+                        loading
+                      }
+                      className="text-gray-500 hover:text-red-400"
+                      title="Remove document"
+                    >
+                      ×
+                    </button>
+
+                  </div>
+                )
+              )}
+
+            </div>
+          )}
 
         </header>
 
-        {/* =====================================================
-            CHAT AREA
-        ===================================================== */}
+        {/* ===================================================
+            CHAT
+            =================================================== */}
 
         <div className="flex-1 overflow-y-auto">
 
-          {messages.length === 0 ? (
+          {messages.length ===
+          0 ? (
 
             <div className="flex h-full items-center justify-center px-4">
 
-              <div className="text-center">
+              <div className="w-full max-w-2xl text-center">
 
-                <div className="mb-4 text-4xl font-bold">
-                  Omnix.AI
-                </div>
+                <h2 className="mb-3 bg-gradient-to-r from-white via-violet-100 to-violet-300 bg-clip-text text-3xl font-semibold tracking-tight text-transparent sm:text-4xl">
+                  How can I help you?
+                </h2>
 
-                <p className="text-gray-400">
-                  Your personal AI assistant
+                <p className="text-slate-500">
+                  Ask anything or upload a document to use RAG.
                 </p>
-
-                <div className="mt-8 grid max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
-
-                  <button
-                    onClick={() =>
-                      setMessage(
-                        "Explain machine learning simply"
-                      )
-                    }
-                    className="rounded-xl border border-gray-700 p-4 text-left hover:bg-[#2a2a2a]"
-                  >
-                    <div className="font-medium">
-                      Explain something
-                    </div>
-
-                    <div className="mt-1 text-sm text-gray-500">
-                      Learn a concept simply
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() =>
-                      setMessage(
-                        "Write a Python program to reverse a string"
-                      )
-                    }
-                    className="rounded-xl border border-gray-700 p-4 text-left hover:bg-[#2a2a2a]"
-                  >
-                    <div className="font-medium">
-                      Help with coding
-                    </div>
-
-                    <div className="mt-1 text-sm text-gray-500">
-                      Write or explain code
-                    </div>
-                  </button>
-
-                </div>
 
               </div>
 
@@ -1325,197 +1754,346 @@ const isXLSX =
             <div className="mx-auto w-full max-w-3xl px-4 py-8">
 
               {messages.map(
-                (msg, index) => (
+                (msg, index) => {
 
-                  <div
-                    key={index}
-                    className={`mb-8 flex ${
-                      msg.role === "user"
-                        ? "justify-end"
-                        : "justify-start"
-                    }`}
-                  >
+                  const parsed =
+                    msg.role ===
+                    "assistant"
+                      ? parseAssistantContent(
+                          msg.content
+                        )
+                      : {
+                          answer:
+                            msg.content,
+                          sources: [] as Source[],
+                        };
 
+                  return (
                     <div
-                      className={`max-w-[85%] rounded-2xl px-5 py-3 ${
-                        msg.role === "user"
-                          ? "bg-[#2f2f2f]"
-                          : "bg-transparent"
+                      key={index}
+                      className={`mb-8 flex ${
+                        msg.role ===
+                        "user"
+                          ? "justify-end"
+                          : "justify-start"
                       }`}
                     >
 
-                      <div className="mb-2 text-xs font-semibold text-gray-400">
-                        {msg.role ===
-                        "user"
-                          ? "You"
-                          : "Omnix.AI"}
-                      </div>
+                      <div
+                        className={`max-w-[85%] rounded-2xl px-5 py-3 ${
+                          msg.role ===
+                          "user"
+                            ? "bg-white/[0.045]"
+                            : "bg-transparent"
+                        }`}
+                      >
 
-                      {msg.role ===
-                        "assistant" &&
-                      msg.content === "" &&
-                      loading ? (
-
-                        <div className="text-gray-400">
-                          Thinking...
+                        <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-violet-200/70">
+                          {msg.role ===
+                          "user"
+                            ? "You"
+                            : "Omnix.AI"}
                         </div>
 
-                      ) : (
+                        {msg.role ===
+                          "assistant" &&
+                        msg.content ===
+                          "" &&
+                        loading ? (
 
-                        <div className="prose prose-invert max-w-none leading-7 text-gray-200">
+                          <div className="text-gray-400">
+                            Thinking...
+                          </div>
 
-                          <ReactMarkdown
-                            remarkPlugins={[
-                              remarkGfm,
-                            ]}
-                            components={{
-                              code({
-                                className,
-                                children,
-                                ...props
-                              }) {
+                        ) : (
 
-                                const match =
-                                  /language-(\w+)/.exec(
-                                    className ||
-                                      ""
-                                  );
+                          <>
+                            {/* =================================
+                                AI ANSWER
+                                ================================= */}
 
-                                const code =
-                                  String(
-                                    children
-                                  ).replace(
-                                    /\n$/,
-                                    ""
-                                  );
+                            <div className="prose prose-invert max-w-none leading-7 text-gray-200">
 
-                                return match ? (
+                              <ReactMarkdown
+                                remarkPlugins={[
+                                  remarkGfm,
+                                ]}
+                                components={{
+                                  code({
+                                    className,
+                                    children,
+                                    ...props
+                                  }) {
+                                    const match =
+                                      /language-(\w+)/.exec(
+                                        className ||
+                                          ""
+                                      );
 
-                                  <div className="my-4 overflow-hidden rounded-xl border border-gray-700 bg-[#111111]">
+                                    const code =
+                                      String(
+                                        children
+                                      ).replace(
+                                        /\n$/,
+                                        ""
+                                      );
 
-                                    <div className="flex items-center justify-between border-b border-gray-700 bg-[#1a1a1a] px-4 py-2">
+                                    return match ? (
+                                      <div className="my-4 overflow-hidden rounded-xl border border-white/10 bg-[#111111]">
 
-                                      <span className="text-xs text-gray-400">
-                                        {match[1]}
-                                      </span>
+                                        <div className="flex items-center justify-between border-b border-white/10 bg-[#1a1a1a] px-4 py-2">
 
-                                      <button
-                                        onClick={() =>
-                                          navigator.clipboard.writeText(
-                                            code
-                                          )
-                                        }
-                                        className="rounded-md px-2 py-1 text-xs text-gray-400 hover:bg-[#2a2a2a] hover:text-white"
-                                      >
-                                        Copy
-                                      </button>
+                                          <span className="text-xs text-gray-400">
+                                            {
+                                              match[1]
+                                            }
+                                          </span>
 
-                                    </div>
+                                          <button
+                                            onClick={() =>
+                                              navigator.clipboard.writeText(
+                                                code
+                                              )
+                                            }
+                                            className="rounded-md px-2 py-1 text-xs text-gray-400 hover:bg-violet-500/15 hover:text-white"
+                                          >
+                                            Copy
+                                          </button>
 
-                                    <pre className="overflow-x-auto p-4 text-sm leading-6">
+                                        </div>
 
+                                        <pre className="overflow-x-auto p-4 text-sm leading-6">
+
+                                          <code
+                                            {...props}
+                                          >
+                                            {
+                                              code
+                                            }
+                                          </code>
+
+                                        </pre>
+
+                                      </div>
+                                    ) : (
                                       <code
                                         {...props}
+                                        className="rounded bg-white/[0.045] px-1.5 py-0.5 text-sm text-gray-200"
                                       >
-                                        {code}
+                                        {
+                                          children
+                                        }
                                       </code>
+                                    );
+                                  },
+                                }}
+                              >
+                                {
+                                  parsed.answer
+                                }
+                              </ReactMarkdown>
 
-                                    </pre>
+                            </div>
 
-                                  </div>
+                            {/* =================================
+                                RAG SOURCES CARD
+                                ================================= */}
 
-                                ) : (
+                            {parsed.sources.length > 0 && (
+  <div className="mt-4 rounded-xl border border-white/10 bg-[#1a1a1a] p-3">
+    <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-gray-300">
+      <span>📚</span>
 
-                                  <code
-                                    {...props}
-                                    className="rounded bg-[#2f2f2f] px-1.5 py-0.5 text-sm text-gray-200"
-                                  >
-                                    {children}
-                                  </code>
+      <span>
+        Sources
+      </span>
+    </div>
 
-                                );
-                              },
-                            }}
-                          >
-                            {msg.content}
-                          </ReactMarkdown>
+    <div className="space-y-2">
+      {parsed.sources.map(
+        (
+          source,
+          sourceIndex
+        ) => {
+          const pageText =
+            source.pageNumber !== null
+              ? ` — Page ${source.pageNumber}`
+              : "";
 
-                        </div>
+          const sourceLabel =
+            `${source.documentName}${pageText}`;
 
-                      )}
+          const canOpen =
+            Boolean(
+              source.documentId
+            );
 
-                      {/* MESSAGE ACTIONS */}
+          const sourceUrl =
+            canOpen
+              ? `/api/documents/${encodeURIComponent(
+                  source.documentId
+                )}/file${
+                  source.pageNumber !==
+                  null
+                    ? `#page=${source.pageNumber}`
+                    : ""
+                }`
+              : null;
 
-                      {msg.content &&
-                        !loading &&
-                        !actionLoading && (
+          return (
+            <button
+              key={`${source.documentId || source.documentName}-${source.pageNumber}-${sourceIndex}`}
+              type="button"
+              disabled={!sourceUrl}
+              onClick={() => {
+                if (!sourceUrl) {
+                  return;
+                }
 
-                        <div className="mt-2 flex items-center gap-2">
+                window.open(
+                  sourceUrl,
+                  "_blank",
+                  "noopener,noreferrer"
+                );
+              }}
+              className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition ${
+                sourceUrl
+                  ? "cursor-pointer bg-[#242424] text-gray-300 hover:bg-[#303030] hover:text-white"
+                  : "cursor-default bg-[#242424] text-gray-500"
+              }`}
+              title={
+                sourceUrl
+                  ? `Open ${sourceLabel}`
+                  : sourceLabel
+              }
+            >
+              <span className="text-slate-500">
+                📄
+              </span>
 
-                          {msg.role === "user" ? (
+              <span className="min-w-0 flex-1 truncate">
+                {sourceLabel}
+              </span>
 
-                            <button
-                              onClick={() =>
-                                startEditingMessage(
-                                  index
-                                )
-                              }
-                              disabled={
-                                editingIndex !== null
-                              }
-                              className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-[#2a2a2a] hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
-                              title="Edit message"
-                            >
-                              ✏️ Edit
-                            </button>
+              {sourceUrl && (
+                <span className="shrink-0 text-xs text-gray-500">
+                  ↗
+                </span>
+              )}
+            </button>
+          );
+        }
+      )}
+    </div>
+  </div>
+)}
 
-                          ) : (
+                          </>
 
-                            <>
+                        )}
+
+                        {/* =====================================
+                            MESSAGE ACTIONS
+                            ===================================== */}
+
+                        {msg.content && (
+                          <div className="mt-2 flex items-center gap-2">
+
+                            {msg.role ===
+                            "user" ? (
+
                               <button
                                 onClick={() =>
-                                  navigator.clipboard.writeText(
-                                    msg.content
+                                  startEditingMessage(
+                                    index
                                   )
                                 }
-                                className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-[#2a2a2a] hover:text-white"
-                                title="Copy response"
+                                disabled={
+                                  loading ||
+                                  actionLoading ||
+                                  editingIndex !==
+                                    null
+                                }
+                                className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-violet-500/15 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                                title="Edit message"
                               >
-                                📋 Copy
+                                ✏️ Edit
                               </button>
 
-                              {index ===
-                                messages.findLastIndex(
-                                  (item) =>
-                                    item.role ===
-                                    "assistant"
-                                ) && (
+                            ) : (
+
+                              <>
+
                                 <button
-                                  onClick={
-                                    regenerateMessage
+                                onClick={() => speakResponse(msg.content)}
+                                className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-violet-500/15 hover:text-white"
+                                title="Read response aloud"
+                              >
+                                🔊 Listen
+                              </button>
+                              <button
+                                onClick={stopSpeaking}
+                                className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-violet-500/15 hover:text-white"
+                                title="Stop spoken response"
+                              >
+                                ⏹ Stop
+                              </button>
+
+                              <button
+                                  onClick={() =>
+                                    navigator.clipboard.writeText(
+                                      msg.content
+                                    )
                                   }
                                   disabled={
-                                    !conversationId
+                                    loading ||
+                                    actionLoading ||
+                                    msg.content ===
+                                      ""
                                   }
-                                  className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-[#2a2a2a] hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
-                                  title="Regenerate response"
+                                  className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-violet-500/15 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                                  title="Copy response"
                                 >
-                                  🔄 Regenerate
+                                  📋 Copy
                                 </button>
-                              )}
 
-                            </>
+                                {index ===
+                                  messages.findLastIndex(
+                                    (
+                                      item
+                                    ) =>
+                                      item.role ===
+                                      "assistant"
+                                  ) && (
 
-                          )}
+                                  <button
+                                    onClick={() =>
+                                      regenerateMessage()
+                                    }
+                                    disabled={
+                                      loading ||
+                                      actionLoading
+                                    }
+                                    className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-violet-500/15 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                                    title="Regenerate response"
+                                  >
+                                    🔄 Regenerate
+                                  </button>
 
-                        </div>
-                      )}
+                                )}
+
+                              </>
+
+                            )}
+
+                          </div>
+                        )}
+
+                      </div>
 
                     </div>
-
-                  </div>
-
-                )
+                  );
+                }
               )}
 
             </div>
@@ -1524,196 +2102,183 @@ const isXLSX =
 
         </div>
 
-        {/* =====================================================
+        {/* ===================================================
             INPUT AREA
-        ===================================================== */}
+            =================================================== */}
 
-        <div className="mx-auto w-full max-w-3xl px-4 pb-6">
+        <div className="border-t border-white/10 bg-white/[0.04] p-4">
 
-          {editingIndex !== null && (
-            <div className="mb-2 flex items-center justify-between rounded-lg border border-gray-700 bg-[#2f2f2f] px-3 py-2 text-sm">
+          <div className="mx-auto max-w-3xl">
 
-              <span className="text-gray-400">
-                ✏️ Editing your message
-              </span>
+            {editingIndex !==
+              null && (
+              <div className="mb-2 flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm">
 
-              <button
-                onClick={cancelEditing}
-                className="text-gray-400 hover:text-white"
-              >
-                Cancel
-              </button>
+                <span className="text-gray-400">
+                  Editing message
+                </span>
 
-            </div>
-          )}
+                <button
+                  onClick={
+                    cancelEditing
+                  }
+                  className="text-gray-500 hover:text-white"
+                >
+                  Cancel
+                </button>
 
-          {/* =====================================================
-              ATTACHED FILES
-          ===================================================== */}
-
-          {uploadedDocuments.length > 0 && (
-
-            <div className="mb-3 flex flex-wrap gap-2">
-
-              {uploadedDocuments.map(
-                (document) => (
-
-                  <div
-                    key={document.id}
-                    className="flex items-center gap-3 rounded-xl border border-gray-700 bg-[#2f2f2f] px-3 py-2"
-                  >
-
-                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-red-500/10 text-lg">
-                      📄
-                    </div>
-
-                    <div className="min-w-0">
-
-                      <div className="max-w-[220px] truncate text-sm font-medium text-white">
-                        {document.name}
-                      </div>
-
-                      <div className="text-xs text-gray-500">
-
-                        {document.name
-                          .toLowerCase()
-                          .endsWith(".docx")
-                          ? "DOCX"
-                          : document.name
-                              .toLowerCase()
-                              .endsWith(".txt")
-                            ? "TXT"
-                            : "PDF"}
-
-                        {document.pages
-                          ? ` • ${document.pages} pages`
-                          : ""}
-
-                        {" • Attached"}
-
-                      </div>
-
-                    </div>
-
-                    <button
-                      onClick={() =>
-                        removeUploadedDocument(
-                          document.id
-                        )
-                      }
-                      className="ml-1 rounded-md px-2 py-1 text-gray-400 hover:bg-[#424242] hover:text-white"
-                      title="Remove attachment"
-                    >
-                      ✕
-                    </button>
-
-                  </div>
-
-                )
-              )}
-
-            </div>
-
-          )}
-
-          {/* =====================================================
-              MESSAGE BOX
-          ===================================================== */}
-
-          <div className="flex items-end rounded-2xl border border-gray-600 bg-[#2f2f2f] p-2">
-
-            {/* FILE UPLOAD */}
-
-            <label
-              className={`cursor-pointer rounded-lg p-3 text-gray-300 hover:bg-[#424242] ${
-                uploading ||
-                editingIndex !== null
-                  ? "pointer-events-none opacity-50"
-                  : ""
-              }`}
-              title="Upload PDF, TXT, or DOCX"
-            >
-
-              {uploading ? "⏳" : "📎"}
-
-              <input
-                type="file"
-                accept=".pdf,.txt,.docx,.csv,.xlsx,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                onChange={uploadPDF}
-                className="hidden"
-              />
-
-            </label>
-
-            {/* TEXTAREA */}
-
-            <textarea
-              value={message}
-              onChange={(e) =>
-                setMessage(e.target.value)
-              }
-              onKeyDown={handleKeyDown}
-              placeholder={
-                editingIndex !== null
-                  ? "Edit your message..."
-                  : "Ask Omnix.AI anything..."
-              }
-              rows={1}
-              className="max-h-40 min-h-12 flex-1 resize-none bg-transparent px-3 py-3 text-white outline-none placeholder:text-gray-500"
-            />
-
-            {/* CANCEL EDIT */}
-
-            {editingIndex !== null && (
-
-              <button
-                onClick={cancelEditing}
-                disabled={actionLoading}
-                className="mr-1 rounded-lg px-3 py-3 text-sm text-gray-400 hover:bg-[#424242] hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
-                title="Cancel edit"
-              >
-                Cancel
-              </button>
-
+              </div>
             )}
 
-            {/* SEND / SAVE EDIT */}
+            {uploadedDocuments.length >
+              0 && (
+              <div className="mb-2 flex gap-2 overflow-x-auto">
 
-            <button
-              onClick={
-                editingIndex !== null
-                  ? saveEditedMessage
-                  : sendMessage
-              }
-              disabled={
-                !message.trim() ||
-                loading ||
-                actionLoading
-              }
-              className="rounded-lg bg-white px-4 py-3 font-medium text-black disabled:cursor-not-allowed disabled:opacity-30"
-              title={
-                editingIndex !== null
-                  ? "Save edited message"
-                  : "Send message"
-              }
-            >
-              {loading || actionLoading
-                ? "..."
-                : editingIndex !== null
-                  ? "✓"
-                  : "➤"}
-            </button>
+                {uploadedDocuments.map(
+                  (document) => (
+                    <div
+                      key={
+                        document.id
+                      }
+                      className="flex shrink-0 items-center gap-2 rounded-lg bg-violet-500/15 px-3 py-2 text-xs text-gray-300"
+                    >
+
+                      <span>
+                        📄
+                      </span>
+
+                      <span className="max-w-40 truncate">
+                        {
+                          document.name
+                        }
+                      </span>
+
+                      <button
+                        onClick={() =>
+                          removeDocument(
+                            document.id
+                          )
+                        }
+                        className="text-gray-500 hover:text-red-400"
+                      >
+                        ×
+                      </button>
+
+                    </div>
+                  )
+                )}
+
+              </div>
+            )}
+
+            <div className="rounded-[28px] border border-white/[0.16] bg-white/[0.055] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_16px_70px_rgba(0,0,0,0.42)] backdrop-blur-3xl transition focus-within:border-violet-300/40 focus-within:bg-white/[0.075] focus-within:shadow-[0_0_0_1px_rgba(167,139,250,0.12),0_16px_70px_rgba(0,0,0,0.42)]">
+
+              <textarea
+                value={
+                  message +
+                  (interimTranscript
+                    ? `${message.trim() ? " " : ""}${interimTranscript}`
+                    : "")
+                }
+                onChange={(event) => {
+                  setMessage(event.target.value);
+                  setInterimTranscript("");
+                }}
+                onKeyDown={
+                  handleKeyDown
+                }
+                placeholder={
+                  editingIndex !==
+                  null
+                    ? "Edit your message..."
+                    : "Message Omnix.AI..."
+                }
+                rows={1}
+                disabled={
+                  loading ||
+                  actionLoading
+                }
+                className="max-h-40 min-h-12 w-full resize-none bg-transparent px-3 py-3 text-[15px] leading-6 text-white outline-none placeholder:text-slate-500"
+              />
+
+              <div className="flex items-center justify-between gap-2 px-1 pb-1">
+
+                <div className="flex items-center gap-2">
+
+                  {/* FILE UPLOAD */}
+
+                  <label className="cursor-pointer rounded-full border border-white/10 px-3 py-2 text-sm text-slate-300 transition hover:border-violet-400/30 hover:bg-violet-500/10 hover:text-white">
+
+                    {uploading
+                      ? "Uploading..."
+                      : "📎 Attach"}
+
+                    <input
+                      type="file"
+                      className="hidden"
+                      accept=".pdf,.txt,.docx,.csv,.xlsx,.pptx,.jpg,.jpeg,.png,.webp"
+                      onChange={
+                        uploadPDF
+                      }
+                      disabled={
+                        uploading ||
+                        loading
+                      }
+                    />
+
+                  </label>
+
+                  <button
+                    type="button"
+                    onClick={startVoiceInput}
+                    disabled={loading || uploading || isListening || editingIndex !== null}
+                    className="rounded-full px-3 py-2 text-sm text-slate-300 transition hover:bg-violet-500/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    title={isListening ? "Listening..." : "Speak your message"}
+                    aria-label="Start voice input"
+                  >
+                    {isListening ? "🎙️" : "🎤 Mic"}
+                  </button>
+
+                </div>
+
+                <button
+                  onClick={() => {
+                    if (
+                      editingIndex !==
+                      null
+                    ) {
+                      editMessage();
+                    } else {
+                      sendMessage();
+                    }
+                  }}
+                  disabled={
+                    !message.trim() ||
+                    loading ||
+                    actionLoading
+                  }
+                  className="rounded-full bg-gradient-to-br from-violet-500 to-indigo-500 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-950/30 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {editingIndex !==
+                  null
+                    ? "Save"
+                    : "Send"}
+                </button>
+
+              </div>
+
+            </div>
+
+            <p className="mt-2 text-center text-xs text-gray-600">
+              Omnix.AI can make mistakes. Check important information.
+            </p>
 
           </div>
 
-          <p className="mt-2 text-center text-xs text-gray-500">
-            Omnix.AI can make mistakes. Check important information.
-          </p>
-
         </div>
 
-      </section>
+      </main>
 
-    </main>
+    </div>
   );
 }

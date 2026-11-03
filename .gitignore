@@ -40,3 +40,25 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 /generated/
+
+
+# Environment variables
+.env
+.env.local
+.env*
+
+# Dependencies and build files
+node_modules/
+.next/
+out/
+
+# User uploaded documents
+public/uploads/*
+!public/uploads/.gitkeep
+
+# Python temporary files
+__pycache__/
+*.pyc
+
+# OCR data
+eng.traineddata

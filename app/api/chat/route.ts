@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+
 import { retrieveRelevantChunks } from "@/lib/rag";
 
 export async function POST(request: Request) {
@@ -180,62 +181,90 @@ export async function POST(request: Request) {
     // BUILD DOCUMENT CONTEXT
     // --------------------------------------------------
 
-    const relevantDocumentText =
-      relevantChunks.length > 0
-        ? relevantChunks
-            .map(
-              (chunk, index) =>
-                `[Source ${index + 1}: ${chunk.documentName}]\n${chunk.content}`
-            )
-            .join(
-              "\n\n---\n\n"
-            )
-        : "";
+   const relevantDocumentText =
+  relevantChunks.length > 0
+    ? relevantChunks
+        .map((chunk, index) => {
+          const locationLabel =
+            chunk.pageNumber != null
+              ? `Page ${chunk.pageNumber}`
+              : chunk.slideNumber != null
+                ? `Slide ${chunk.slideNumber}`
+                : "Location unknown";
 
+          return [
+            `[Source ${index + 1}]`,
+            `Document: ${chunk.documentName}`,
+            `Location: ${locationLabel}`,
+            "Content:",
+            chunk.content,
+          ].join("\n");
+        })
+        .join("\n\n---\n\n")
+    : "";
+
+ 
     // --------------------------------------------------
     // BUILD SYSTEM PROMPT
     // --------------------------------------------------
 
-    let systemPrompt = `You are Omnix.AI.
+    const conversationHistory = messages
+      .slice(0, -1)
+      .slice(-8)
+      .map((item: { role: string; content: string }) => {
+        return `${item.role}: ${item.content}`;
+      })
+      .join("\n\n");
 
-You are a helpful, accurate and natural AI assistant.
+    let systemPrompt = `You are Omnix.AI, a helpful AI assistant.
 
-Here are the user's saved memories:
-
+USER MEMORIES:
 ${memoryText}
 
-Use these memories when they are relevant to the user's question.
-Do not mention the memory system unless the user asks about it.
+Use memories only when relevant. Do not mention the memory system unless asked.
 
-Answer clearly and naturally.
+CORE RULES:
+1. Answer the user's actual question directly.
+2. Explain concepts using your general knowledge when the user asks for an explanation.
+3. Never refuse to explain a topic just because an uploaded document contains only a heading.
+4. Clearly distinguish document facts from additional explanations.
+5. Keep answers understandable, organized, and useful.
+6. For follow-up questions such as "explain it", "why?", or "give examples", use the previous conversation to identify the topic.
+7. Do not repeat the same disclaimer instead of answering.
+8. If the user asks for advantages, disadvantages, examples, or applications, provide them directly.
 
-If the user asks a normal question that is unrelated
-to uploaded documents, answer using your available knowledge.
+PREVIOUS CONVERSATION:
+${conversationHistory || "No previous conversation provided."}
+
+If the question is unrelated to uploaded documents, answer using your general knowledge.
 `;
 
     // --------------------------------------------------
-    // ADD RAG CONTEXT
+    // ADD DOCUMENT CONTEXT
     // --------------------------------------------------
 
     if (relevantDocumentText) {
       systemPrompt += `
 
-The user has uploaded documents.
-
-The following information was retrieved from those documents:
+UPLOADED DOCUMENT CONTEXT:
+The following text was retrieved from the user's documents.
+Treat it as evidence of what the document actually contains.
 
 ${relevantDocumentText}
 
-IMPORTANT INSTRUCTIONS:
-
-- Use the document information when it is relevant.
-- Prefer the document information for questions about the uploaded files.
-- Do not invent information that is not supported by the retrieved document content.
-- If the retrieved document content does not contain the answer, clearly say that the uploaded document does not provide enough information.
-- Do not mention embeddings, vector databases, chunks, retrieval, or the RAG system to the user.
-
+DOCUMENT ANSWERING RULES:
+- For questions about a specific page, describe the content retrieved from that page.
+- Do not claim that information appears in the document unless the retrieved text supports that claim.
+- If a page contains only a heading, state that briefly, then explain the heading if the user asks for an explanation.
+- If the user asks to explain a concept, answer the concept question using general knowledge even if the document provides no details.
+- Label additional knowledge as "General explanation" when it is not present in the document.
+- If the user asks "explain machine learning advantages", explain the advantages of machine learning. Do not merely repeat the heading.
+- If the user asks "explain it", resolve "it" using the previous conversation and answer that topic.
+- Never invent document quotations, page contents, or citations.
+- Do not mention internal retrieval processes, embeddings, chunks, or databases.
 `;
     }
+
 
     // --------------------------------------------------
     // CALL OLLAMA
@@ -301,133 +330,106 @@ IMPORTANT INSTRUCTIONS:
 
     let streamClosed = false;
 
-    const stream =
-      new ReadableStream({
-        async start(controller) {
-          const safeEnqueue = (
-            content: string
-          ) => {
-            if (
-              streamClosed ||
-              !content
-            ) {
-              return;
-            }
-
-            try {
-              controller.enqueue(
-                encoder.encode(content)
-              );
-            } catch (error) {
-              console.error(
-                "Stream enqueue error:",
-                error
-              );
-
-              streamClosed = true;
-            }
-          };
-
-          const safeClose = () => {
-            if (streamClosed) {
-              return;
-            }
-
-            try {
-              streamClosed = true;
-              controller.close();
-            } catch (error) {
-              console.error(
-                "Stream close error:",
-                error
-              );
-            }
-          };
-
-          const safeError = (
-            error: unknown
-          ) => {
-            if (streamClosed) {
-              return;
-            }
-
-            try {
-              streamClosed = true;
-              controller.error(error);
-            } catch (controllerError) {
-              console.error(
-                "Stream controller error:",
-                controllerError
-              );
-            }
-          };
+    const stream = new ReadableStream({
+      async start(controller) {
+        const safeEnqueue = (
+          content: string
+        ) => {
+          if (
+            streamClosed ||
+            !content
+          ) {
+            return;
+          }
 
           try {
-            let buffer = "";
+            controller.enqueue(
+              encoder.encode(content)
+            );
+          } catch (error) {
+            console.error(
+              "Stream enqueue error:",
+              error
+            );
 
-            while (true) {
-              const {
-                done,
-                value,
-              } = await reader.read();
+            streamClosed = true;
+          }
+        };
 
-              if (done) {
-                break;
-              }
+        const safeClose = () => {
+          if (streamClosed) {
+            return;
+          }
 
-              buffer +=
-                decoder.decode(
-                  value,
-                  {
-                    stream: true,
-                  }
-                );
+          try {
+            streamClosed = true;
+            controller.close();
+          } catch (error) {
+            console.error(
+              "Stream close error:",
+              error
+            );
+          }
+        };
 
-              const lines =
-                buffer.split("\n");
+        const safeError = (
+          error: unknown
+        ) => {
+          if (streamClosed) {
+            return;
+          }
 
-              buffer =
-                lines.pop() || "";
+          try {
+            streamClosed = true;
+            controller.error(error);
+          } catch (controllerError) {
+            console.error(
+              "Stream controller error:",
+              controllerError
+            );
+          }
+        };
 
-              for (const line of lines) {
-                if (!line.trim()) {
-                  continue;
-                }
+        try {
+          let buffer = "";
 
-                try {
-                  const data =
-                    JSON.parse(line);
+          while (true) {
+            const {
+              done,
+              value,
+            } = await reader.read();
 
-                  const content =
-                    data.message
-                      ?.content || "";
-
-                  if (content) {
-                    fullResponse +=
-                      content;
-
-                    safeEnqueue(
-                      content
-                    );
-                  }
-                } catch {
-                  // Ignore malformed JSON
-                }
-              }
+            if (done) {
+              break;
             }
 
-            // ------------------------------------------------
-            // PROCESS REMAINING BUFFER
-            // ------------------------------------------------
+            buffer += decoder.decode(
+              value,
+              {
+                stream: true,
+              }
+            );
 
-            if (buffer.trim()) {
+            const lines =
+              buffer.split("\n");
+
+            buffer =
+              lines.pop() || "";
+
+            for (
+              const line of lines
+            ) {
+              if (!line.trim()) {
+                continue;
+              }
+
               try {
                 const data =
-                  JSON.parse(buffer);
+                  JSON.parse(line);
 
                 const content =
-                  data.message
-                    ?.content || "";
+                  data.message?.content ||
+                  "";
 
                 if (content) {
                   fullResponse +=
@@ -438,151 +440,195 @@ IMPORTANT INSTRUCTIONS:
                   );
                 }
               } catch {
-                // Ignore incomplete JSON
+                // Ignore malformed JSON
               }
             }
+          }
 
-            // ------------------------------------------------
-            // ADD DOCUMENT SOURCES
-            // ------------------------------------------------
+          // ------------------------------------------------
+          // PROCESS REMAINING BUFFER
+          // ------------------------------------------------
 
-            const uniqueSources = [
-              ...new Set(
-                relevantChunks.map(
-                  (chunk) =>
-                    chunk.documentName
-                )
-              ),
-            ];
+          if (buffer.trim()) {
+            try {
+              const data =
+                JSON.parse(buffer);
 
-            if (
-              uniqueSources.length > 0 &&
-              fullResponse
-            ) {
-              const sourceText = `\n\n---\n\n**Sources:**\n${uniqueSources
-                .map(
-                  (name) =>
-                    `- 📄 ${name}`
-                )
+              const content =
+                data.message?.content ||
+                "";
+
+              if (content) {
+                fullResponse +=
+                  content;
+
+                safeEnqueue(
+                  content
+                );
+              }
+            } catch {
+              // Ignore incomplete JSON
+            }
+          }
+
+
+          // ------------------------------------------------
+          // ADD DOCUMENT SOURCES
+          // ------------------------------------------------
+
+          const uniqueSources = [
+            ...new Map(
+              relevantChunks.map((chunk) => [
+                `${chunk.documentId}-${chunk.pageNumber ?? "none"}-${chunk.slideNumber ?? "none"}`,
+                {
+                  documentId: chunk.documentId,
+                  documentName: chunk.documentName,
+                  pageNumber: chunk.pageNumber ?? null,
+                  slideNumber: chunk.slideNumber ?? null,
+                },
+              ])
+            ).values(),
+          ];
+
+          if (uniqueSources.length > 0 && fullResponse) {
+            const sourceText =
+              `\n\n---\n\n**Sources:**\n${uniqueSources
+                .map((source) => {
+                  const locationText =
+                    source.pageNumber != null
+                      ? ` — Page ${source.pageNumber}`
+                      : source.slideNumber != null
+                        ? ` — Slide ${source.slideNumber}`
+                        : "";
+
+                  return `- 📄 ${source.documentName}${locationText}`;
+                })
                 .join("\n")}`;
 
-              fullResponse +=
-                sourceText;
+            fullResponse += sourceText;
+            safeEnqueue(sourceText);
 
-              safeEnqueue(
-                sourceText
-              );
-            }
+            // Send structured source metadata to the frontend.
+            const sourceMetadata = JSON.stringify({
+              type: "sources",
+              sources: uniqueSources,
+            });
 
-            // ------------------------------------------------
-            // SAVE ASSISTANT MESSAGE
-            // ------------------------------------------------
+            const sourceMetadataText =
+              `\n\n__OMNIX_SOURCES__${sourceMetadata}__END_OMNIX_SOURCES__`;
 
-            if (fullResponse) {
-              await prisma.message.create({
-                data: {
-                  conversationId:
-                    conversation.id,
-                  role: "assistant",
-                  content:
-                    fullResponse,
-                },
-              });
+            fullResponse += sourceMetadataText;
+            safeEnqueue(sourceMetadataText);
+          }
 
-              console.log(
-                "CHAT: Assistant response saved"
-              );
-            }
 
-            // ------------------------------------------------
-            // UPDATE CONVERSATION TIME
-            // ------------------------------------------------
+          // ------------------------------------------------
+          // SAVE ASSISTANT MESSAGE
+          // ------------------------------------------------
 
-            await prisma.conversation.update({
+          
+if (fullResponse) {
+  await prisma.message.create({
+    data: {
+      conversationId: conversation.id,
+      role: "assistant",
+      content: fullResponse,
+    },
+  });
+
+  console.log("CHAT: Assistant response saved");
+}
+
+
+          // ------------------------------------------------
+          // UPDATE CONVERSATION TIME
+          // ------------------------------------------------
+
+          await prisma.conversation.update({
+            where: {
+              id: conversation.id,
+            },
+            data: {
+              updatedAt:
+                new Date(),
+            },
+          });
+
+          // ------------------------------------------------
+          // SAVE USER NAME TO MEMORY
+          // ------------------------------------------------
+
+          const userText =
+            latestUserMessage.content.trim();
+
+          const nameMatch =
+            userText.match(
+              /(?:my name is|i am|i'm)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
+            );
+
+          if (nameMatch) {
+            const name =
+              nameMatch[1].trim();
+
+            await prisma.memory.upsert({
               where: {
-                id: conversation.id,
+                key: "name",
               },
-              data: {
-                updatedAt:
-                  new Date(),
+              update: {
+                value: name,
+              },
+              create: {
+                key: "name",
+                value: name,
               },
             });
 
-            // ------------------------------------------------
-            // SAVE USER NAME TO MEMORY
-            // ------------------------------------------------
-
-            const userText =
-              latestUserMessage.content.trim();
-
-            const nameMatch =
-              userText.match(
-                /(?:my name is|i am|i'm)\s+([A-Za-z]+(?:\s+[A-Za-z]+)*)/i
-              );
-
-            if (nameMatch) {
-              const name =
-                nameMatch[1].trim();
-
-              await prisma.memory.upsert({
-                where: {
-                  key: "name",
-                },
-                update: {
-                  value: name,
-                },
-                create: {
-                  key: "name",
-                  value: name,
-                },
-              });
-
-              console.log(
-                "MEMORY: Saved name:",
-                name
-              );
-            }
-
-            // ------------------------------------------------
-            // CLOSE STREAM
-            // ------------------------------------------------
-
-            safeClose();
-          } catch (error) {
-            console.error(
-              "Streaming error:",
-              error
+            console.log(
+              "MEMORY: Saved name:",
+              name
             );
-
-            safeError(error);
           }
-        },
 
-        cancel() {
-          streamClosed = true;
+          // ------------------------------------------------
+          // CLOSE STREAM
+          // ------------------------------------------------
 
-          try {
-            reader.cancel();
-          } catch {
-            // Ignore cancellation error
-          }
-        },
-      });
+          safeClose();
+        } catch (error) {
+          console.error(
+            "Streaming error:",
+            error
+          );
+
+          safeError(error);
+        }
+      },
+
+      cancel() {
+        streamClosed = true;
+
+        try {
+          reader.cancel();
+        } catch {
+          // Ignore cancellation error
+        }
+      },
+    });
 
     // --------------------------------------------------
     // RETURN STREAM
     // --------------------------------------------------
 
-    return new Response(stream, {
-      headers: {
-        "Content-Type":
-          "text/plain; charset=utf-8",
-        "Cache-Control":
-          "no-cache",
-        "X-Accel-Buffering":
-          "no",
-      },
-    });
+    
+return new Response(stream, {
+  headers: {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+    "X-Conversation-Id": conversation.id,
+  },
+});
+
   } catch (error) {
     console.error(
       "Chat API error:",
